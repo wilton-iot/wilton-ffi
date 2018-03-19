@@ -5,6 +5,8 @@ license:             MIT
 author:              "alex at staticlibs.net"
 maintainer:          "alex at staticlibs.net"
 copyright:           "2018 alex at staticlibs.net"
+category:            FFI
+synopsis:            "Haskell modules support for Wilton JavaScript runtime"
 
 extra-source-files:
 - README.md

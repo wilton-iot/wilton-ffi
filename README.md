@@ -3,8 +3,8 @@ Haskell modules support for Wilton JavaScript runtime
 
 This library allows to write Wilton native modules in Haskell.
 
- - [package on hackage.haskell.org](https://hackage.haskell.org/package/wilton-ffi)
- - [API documentation](https://hackage.haskell.org/package/wilton-ffi-0.1.0.0/docs/Foreign-Wilton-FFI.html)
+ - TODO: [package on hackage.haskell.org](https://hackage.haskell.org/package/wilton-ffi)
+ - TODO: [API documentation](https://hackage.haskell.org/package/wilton-ffi-0.1.0.0/docs/Foreign-Wilton-FFI.html)
  - [haskell module example](https://github.com/wilton-iot/wilton_examples/tree/master/haskell)
 
 License information
