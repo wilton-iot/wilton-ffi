@@ -1,13 +1,14 @@
 name:                wilton-ffi
 version:             0.1.0.0
 github:              "https://github.com/wilton-iot/wilton-ffi"
-license:             Apache
-author:              "wilton"
-maintainer:          "alex@staticlibs.net"
+license:             MIT
+author:              "alex at staticlibs.net"
+maintainer:          "alex at staticlibs.net"
 copyright:           "2018 alex at staticlibs.net"
 
 extra-source-files:
 - README.md
+- ChangeLog.md
 
 # Metadata used when publishing your package
 # synopsis:            Short description of your package
@@ -19,7 +20,7 @@ extra-source-files:
 description:         Please see the README on Github at <https://github.com/wilton-iot/wilton-ffi#readme>
 
 dependencies:
-- base >= 4.7 && < 5
+- base >= 4.6 && < 5
 - aeson
 - bytestring
 
