@@ -15,23 +15,26 @@ module Foreign.Wilton.FFI (
     --
     -- * Usage example:
     -- $use
-    registerWiltoncall,
-    createWiltonError
+    registerWiltonCall,
+    createWiltonError,
+    runWiltonScript
     ) where
 
-import qualified Control.Exception as E (SomeException, catch)
-import Data.Aeson (FromJSON, ToJSON, encode, eitherDecode)
-import Data.ByteString (ByteString, useAsCString, useAsCStringLen, packCString, packCStringLen)
-import qualified Data.ByteString as BS (concat, length, putStrLn)
-import qualified Data.ByteString.Lazy as BL (fromChunks, toChunks)
-{- Data.ByteString.UTF8 (fromString) -}
-import qualified Data.ByteString.Char8 as BC8 (pack)
-import Data.Data (Data, constrFields, dataTypeConstrs, dataTypeOf)
-import Foreign.Ptr (Ptr, FunPtr, nullPtr, ptrToIntPtr)
+import Data.ByteString (ByteString)
+import Foreign.Ptr (Ptr, FunPtr)
 import Foreign.C.String (CString, CStringLen)
-import Foreign.C.Types
-import Foreign.Marshal.Utils (copyBytes)
-import Foreign.Storable (poke, pokeByteOff)
+import Foreign.C.Types (CChar, CInt(..))
+
+import qualified Control.Exception as Exception (SomeException, catch)
+import qualified Data.Aeson as Aeson (FromJSON, ToJSON, Value, encode, eitherDecode)
+import qualified Data.ByteString as ByteString (concat, length, putStrLn, useAsCString, packCString, packCStringLen)
+import qualified Data.ByteString.Lazy as ByteStringLazy (fromChunks, toChunks)
+import qualified Data.ByteString.UTF8 as UTF8 (fromString, toString)
+import qualified Data.Data as Data (Data, constrFields, dataTypeConstrs, dataTypeOf)
+import qualified Foreign.Ptr as Ptr (Ptr, FunPtr, nullPtr, ptrToIntPtr)
+import qualified Foreign.Marshal.Alloc as Alloc (alloca)
+import qualified Foreign.Marshal.Utils as MarshalUtils (copyBytes)
+import qualified Foreign.Storable as Storable (peek, poke, pokeByteOff)
 
 
 -- callback types
@@ -52,6 +55,8 @@ foreign import ccall unsafe "wilton_free"
 foreign import ccall safe "wiltoncall_register"
     wiltoncall_register :: CString -> CInt -> Ptr () -> FunPtr WiltonCallback -> IO CString
 
+foreign import ccall safe "wiltoncall_runscript"
+    wiltoncall_runscript :: CString -> CInt -> CString -> CInt -> Ptr (CString) -> Ptr (CInt) -> IO CString
 
 -- function pointer wrapper
 
@@ -63,30 +68,30 @@ foreign import ccall "wrapper"
 
 copyToWiltonBuffer :: ByteString -> IO CString
 copyToWiltonBuffer bs = do
-    res <- wilton_alloc (fromIntegral ((BS.length bs) + 1))
-    useAsCString bs (\cs ->
-        copyBytes res cs (BS.length bs))
-    pokeByteOff res (BS.length bs) (0 :: CChar)
+    res <- wilton_alloc (fromIntegral ((ByteString.length bs) + 1))
+    ByteString.useAsCString bs (\cs ->
+        MarshalUtils.copyBytes res cs (ByteString.length bs))
+    Storable.pokeByteOff res (ByteString.length bs) (0 :: CChar)
     return res
 
 wrapBsCallback :: WiltonCallbackInternal -> WiltonCallback
 wrapBsCallback cb = (\_ jsonCs jsonCsLen jsonOutPtr jsonOutLenPtr -> do
-    dataBs <- if 0 /= ptrToIntPtr jsonCs && jsonCsLen > 0
-        then packCStringLen (jsonCs, (fromIntegral jsonCsLen))
-        else return (BC8.pack "{}")
-    respEither <- E.catch
+    dataBs <- if 0 /= Ptr.ptrToIntPtr jsonCs && jsonCsLen > 0
+        then ByteString.packCStringLen (jsonCs, (fromIntegral jsonCsLen))
+        else return (UTF8.fromString "{}")
+    respEither <- Exception.catch
         (cb dataBs)
-        (\(e :: E.SomeException) -> do
-            return (Left (BC8.pack (show e))))
+        (\(e :: Exception.SomeException) -> do
+            return (Left (UTF8.fromString (show e))))
     either
         (\errBs -> do
             errCs <- copyToWiltonBuffer errBs
             return errCs)
         (\respBs -> do
             respCs <- copyToWiltonBuffer respBs
-            poke jsonOutPtr respCs
-            poke jsonOutLenPtr (fromIntegral (BS.length respBs))
-            return nullPtr)
+            Storable.poke jsonOutPtr respCs
+            Storable.poke jsonOutLenPtr (fromIntegral (ByteString.length respBs))
+            return Ptr.nullPtr)
         respEither )
 
 -- | Registers a function, that can be called from javascript
@@ -113,31 +118,34 @@ wrapBsCallback cb = (\_ jsonCs jsonCsLen jsonOutPtr jsonOutLenPtr -> do
 --
 -- Return value: error status.
 --
-registerWiltoncall :: forall from to. (Data from, FromJSON from, ToJSON to) => String -> (from -> IO to) -> IO (Maybe ByteString)
-registerWiltoncall nameString cbJson = do
+registerWiltonCall ::
+        forall from to. (Data.Data from, Aeson.FromJSON from, Aeson.ToJSON to) =>
+        String -> (from -> IO to) -> IO (Maybe ByteString)
+registerWiltonCall nameString cbJson = do
     let cbBs = (\jsonBs -> either
-            (\e -> return (Left (BC8.pack ("JSON parse error: [" ++ (show e) ++ "], required fields: " ++
-                ((show . (map constrFields) . dataTypeConstrs . dataTypeOf) (undefined::from))))))
+            (\e -> return (Left (UTF8.fromString ("JSON parse error: [" ++ (show e) ++ "], required fields: " ++
+                ((show . (map Data.constrFields) . Data.dataTypeConstrs . Data.dataTypeOf) (undefined::from))))))
             (\obj -> do
                 resObj <- cbJson obj
-                let resBs = BS.concat (BL.toChunks (encode resObj))
+                let resBs = ByteString.concat (ByteStringLazy.toChunks (Aeson.encode resObj))
                 return (Right resBs) )
-            (eitherDecode (BL.fromChunks [jsonBs]) :: Either String from) )
+            (Aeson.eitherDecode (ByteStringLazy.fromChunks [jsonBs]) :: Either String from) )
     let cbCs = wrapBsCallback cbBs
     cb <- createCallbackPtr cbCs
-    let name = BC8.pack nameString
-    errc <- useAsCStringLen name (\(cs, len) ->
-        wiltoncall_register cs (fromIntegral len) nullPtr cb )
-    if 0 /= ptrToIntPtr errc then do
-        bs <- packCString errc
+    let nameBs = UTF8.fromString nameString
+    errc <- ByteString.useAsCString nameBs (\cs ->
+        wiltoncall_register cs (fromIntegral (ByteString.length nameBs)) Ptr.nullPtr cb )
+    if 0 /= Ptr.ptrToIntPtr errc then do
+        bs <- ByteString.packCString errc
         wilton_free errc
         return (Just bs)
     else return Nothing
 
+
 -- | Create an error message, that can be passed back to Wilton
 --
 -- Helper function, that can be used with a @Maybe ByteString@ value returned
--- from @registerWiltoncall@ function.
+-- from @registerWiltonCall@ function.
 --
 -- Arguments:
 --
@@ -148,9 +156,62 @@ registerWiltoncall nameString cbJson = do
 createWiltonError :: Maybe ByteString -> IO CString
 createWiltonError errBsMaybe =
     maybe
-        (return nullPtr)
+        (return Ptr.nullPtr)
         copyToWiltonBuffer
         errBsMaybe
+
+
+-- | Call JavaScript function
+--
+-- Allows to call a specified JavaScript function
+-- passing arguments as a list of JSON values and receiving
+-- result as a @ByteString@.
+--
+-- Arguments (JSON call descriptor fields):
+--
+--    * @module :: Aeson.String@: name of the RequireJS module
+--    * @func :: Aeson.String@: name of the function field in the module object (optional: not needed if module itself is a function)
+--    * @args :: Aeson.Vector@: function arguments (optional)
+--
+-- Return value: either error string or call response as a @ByteString@
+--
+-- Example:
+--
+-- > -- prepare call descriptor (Aeson.Value)
+-- > let callDesc = Aeson.Object (Map.fromList [
+-- >         ("module", "lodash/string"),
+-- >         ("func", "capitalize"),
+-- >         ("args", Aeson.Array (Vector.fromList [Aeson.String msg]))
+-- >         ])
+-- >
+-- > -- perform a call and check the results
+-- > respEither <- runWiltonScript callDesc
+-- > either (\err -> ...) (\respBs -> ...) respEither
+--
+runWiltonScript :: Aeson.Value -> IO (Either String ByteString)
+runWiltonScript callDesc = do
+    let callDescBs = ByteString.concat (ByteStringLazy.toChunks (Aeson.encode callDesc))
+    ByteString.useAsCString callDescBs (\cs ->
+        Alloc.alloca (\outPtr -> do
+            Alloc.alloca (\outLenPtr -> do
+                let len = fromIntegral (ByteString.length callDescBs)
+                errc <- wiltoncall_runscript cs (fromIntegral 0) cs len outPtr outLenPtr
+                out <- Storable.peek outPtr
+                outLen <- Storable.peek outLenPtr
+                res <- if 0 /= Ptr.ptrToIntPtr errc then do
+                    bs <- ByteString.packCString errc
+                    wilton_free errc
+                    return (Left (UTF8.toString bs))
+                else do
+                    if 0 /= Ptr.ptrToIntPtr out && outLen > 0 then do
+                       outBs <- ByteString.packCStringLen (out, (fromIntegral outLen))
+                       return (Right outBs)
+                    else do
+                       return (Right (UTF8.fromString ""))
+                if 0 /= Ptr.ptrToIntPtr out then do
+                    _ <- wilton_free out
+                    return res
+                else return res )))
 
 -- $use
 --
@@ -159,6 +220,7 @@ createWiltonError errBsMaybe =
 -- > dependencies:
 -- >    - ...
 -- >    - aeson
+-- >    - utf8-string
 -- >    - wilton-ffi
 --
 -- Inside @Lib.hs@, enable required extensions:
@@ -194,7 +256,7 @@ createWiltonError errBsMaybe =
 -- > wilton_module_init :: IO CString
 -- > wilton_module_init = do
 -- >     -- register a call, error checking omitted
--- >     _ <- registerWiltoncall "hello" hello
+-- >     _ <- registerWiltonCall "hello" hello
 -- >     -- return success status to Wilton
 -- >     createWiltonError Nothing
 --

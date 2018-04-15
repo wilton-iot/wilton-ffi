@@ -1,6 +1,6 @@
 name:                wilton-ffi
-version:             0.1.0.0
-github:              "https://github.com/wilton-iot/wilton-ffi"
+version:             0.2.0.0
+github:              "wilton-iot/wilton-ffi"
 license:             MIT
 author:              "alex at staticlibs.net"
 maintainer:          "alex at staticlibs.net"
@@ -19,12 +19,13 @@ extra-source-files:
 # To avoid duplicated efforts in documentation and dealing with the
 # complications of embedding Haddock markup inside cabal files, it is
 # common to point users to the README.md file.
-description:         Please see the README on Github at <https://github.com/wilton-iot/wilton-ffi#readme>
+description:         Please see the README on GitHub at <https://github.com/wilton-iot/wilton-ffi#readme>
 
 dependencies:
 - base >= 4.6 && < 5
 - aeson
 - bytestring
+- utf8-string
 
 library:
   source-dirs: src
