@@ -16,18 +16,23 @@ module Foreign.Wilton.FFI (
     -- * Usage example:
     -- $use
       registerWiltonCall
-    , runWiltonCall
-    , runWiltonScript
+    , invokeWiltonCall
+    , invokeWiltonCallByteString
     , createWiltonError
     ) where
 
 import Prelude
     ( Either(Left, Right), IO, Maybe(Just, Nothing), String
     , (/=), (>), (&&), (.), (+), (++)
-    , either, fromIntegral, map, maybe, return, show, undefined
+    , fromIntegral, map, return, show, undefined
     )
 
 import Control.Exception (SomeException, catch)
+import Data.Aeson (FromJSON, ToJSON)
+import qualified Data.Aeson as Aeson (encode, eitherDecode)
+import qualified Data.ByteString as ByteString (concat, length)
+import qualified Data.ByteString.Lazy as ByteStringLazy (fromChunks, toChunks)
+import qualified Data.ByteString.UTF8 as UTF8 (fromString)
 import Data.ByteString (ByteString, packCString, packCStringLen, useAsCString)
 import Data.Data (Data, constrFields, dataTypeConstrs, dataTypeOf)
 import Foreign.Ptr (Ptr, FunPtr)
@@ -37,11 +42,6 @@ import Foreign.Marshal.Alloc (alloca)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, FunPtr, nullPtr, ptrToIntPtr)
 import Foreign.Storable (peek, poke, pokeByteOff)
-
-import qualified Data.Aeson as Aeson (FromJSON, ToJSON, Value, encode, eitherDecode)
-import qualified Data.ByteString as ByteString (concat, length, putStrLn)
-import qualified Data.ByteString.Lazy as ByteStringLazy (fromChunks, toChunks)
-import qualified Data.ByteString.UTF8 as UTF8 (fromString, toString)
 
 -- callback types
 
@@ -63,9 +63,6 @@ foreign import ccall safe "wiltoncall_register"
 foreign import ccall safe "wiltoncall"
     wiltoncall :: CString -> CInt -> CString -> CInt -> Ptr (CString) -> Ptr (CInt) -> IO CString
 
-foreign import ccall safe "wiltoncall_runscript"
-    wiltoncall_runscript :: CString -> CInt -> CString -> CInt -> Ptr (CString) -> Ptr (CInt) -> IO CString
-
 -- function pointer wrapper
 
 foreign import ccall "wrapper"
@@ -76,31 +73,42 @@ foreign import ccall "wrapper"
 
 copyToWiltonBuffer :: ByteString -> IO CString
 copyToWiltonBuffer bs = do
-    res <- wilton_alloc (fromIntegral ((ByteString.length bs) + 1))
+    res <- wilton_alloc ((bytesLength bs) + 1)
     useAsCString bs (\cs ->
         copyBytes res cs (ByteString.length bs))
     pokeByteOff res (ByteString.length bs) (0 :: CChar)
     return res
 
+createParseError :: Data a => String -> a -> ByteString
+createParseError e undef =
+    UTF8.fromString ("JSON parse error: [" ++ e ++ "], required fields: " ++
+        ((show . (map constrFields) . dataTypeConstrs . dataTypeOf) undef))
+
+encodeJsonBytes :: ToJSON a => a -> ByteString
+encodeJsonBytes = ByteString.concat . ByteStringLazy.toChunks . Aeson.encode
+
+bytesLength :: ByteString -> CInt
+bytesLength = fromIntegral . ByteString.length
+
 wrapBsCallback :: WiltonCallbackInternal -> WiltonCallback
 wrapBsCallback cb = (\_ jsonCs jsonCsLen jsonOutPtr jsonOutLenPtr -> do
-    dataBs <- if 0 /= ptrToIntPtr jsonCs && jsonCsLen > 0
+    dataBs <-
+        if 0 /= ptrToIntPtr jsonCs && jsonCsLen > 0
         then packCStringLen (jsonCs, (fromIntegral jsonCsLen))
         else return (UTF8.fromString "{}")
-    respEither <- catch
+    respEither <-
+        catch
         (cb dataBs)
-        (\(e :: SomeException) -> do
+        (\(e :: SomeException) ->
             return (Left (UTF8.fromString (show e))))
-    either
-        (\errBs -> do
-            errCs <- copyToWiltonBuffer errBs
-            return errCs)
-        (\respBs -> do
+    case respEither of
+        Left errBs ->
+            copyToWiltonBuffer errBs
+        Right respBs -> do
             respCs <- copyToWiltonBuffer respBs
             poke jsonOutPtr respCs
-            poke jsonOutLenPtr (fromIntegral (ByteString.length respBs))
-            return nullPtr)
-        respEither )
+            poke jsonOutLenPtr (bytesLength respBs)
+            return nullPtr )
 
 -- | Registers a function, that can be called from javascript
 --
@@ -121,138 +129,127 @@ wrapBsCallback cb = (\_ jsonCs jsonCsLen jsonOutPtr jsonOutLenPtr -> do
 --
 -- Arguments:
 --
---    * @name :: String@: name for this call, that should be used from JavaScript to invoke the function
---    * @callback :: (from -> IO to)@: Function, that will be called from JavaScript
+--    * @name :: ByteString@: name for this call, that should be used from JavaScript to invoke the function
+--    * @callback :: (arguments -> IO result)@: Function, that will be called from JavaScript
 --
 -- Return value: error status.
 --
 registerWiltonCall ::
-        forall from to. (Data from, Aeson.FromJSON from, Aeson.ToJSON to) =>
-        String -> (from -> IO to) -> IO (Maybe ByteString)
-registerWiltonCall nameString cbJson = do
-    let cbBs = (\jsonBs -> either
-            (\e -> return (Left (UTF8.fromString ("JSON parse error: [" ++ (show e) ++ "], required fields: " ++
-                ((show . (map constrFields) . dataTypeConstrs . dataTypeOf) (undefined::from))))))
-            (\obj -> do
-                resObj <- cbJson obj
-                let resBs = ByteString.concat (ByteStringLazy.toChunks (Aeson.encode resObj))
-                return (Right resBs) )
-            (Aeson.eitherDecode (ByteStringLazy.fromChunks [jsonBs]) :: Either String from) )
+        forall arguments result. (Data arguments, FromJSON arguments, ToJSON result) =>
+        ByteString -> (arguments -> IO result) -> IO (Maybe ByteString)
+registerWiltonCall nameBs cbJson = do
+    let cbBs = (\jsonBs ->
+            case Aeson.eitherDecode (ByteStringLazy.fromChunks [jsonBs]) of
+                Left e -> return (Left (createParseError e (undefined :: arguments)))
+                Right (obj :: arguments) -> do
+                    -- target callback is invoked here
+                    resObj <- cbJson obj
+                    let resBs = encodeJsonBytes resObj
+                    return (Right resBs) )
     let cbCs = wrapBsCallback cbBs
     cb <- createCallbackPtr cbCs
-    let nameBs = UTF8.fromString nameString
-    errc <- useAsCString nameBs (\cs ->
-        wiltoncall_register cs (fromIntegral (ByteString.length nameBs)) nullPtr cb )
-    if 0 /= ptrToIntPtr errc then do
+    errc <-
+        useAsCString nameBs (\cs ->
+            wiltoncall_register cs (bytesLength nameBs) nullPtr cb )
+    if 0 /= ptrToIntPtr errc
+    then do
         bs <- packCString errc
         wilton_free errc
         return (Just bs)
     else return Nothing
 
--- | Call a function from @WiltonCall@ registry
+-- | Invoke a function from @WiltonCall@ registry
 --
 -- Allows to call a specified function, that was previously registered as a @WiltonCall@
--- passing arguments as a JSON value and receiving
--- result as a @ByteString@.
+-- passing arguments as a data that can be converted to JSON and receiving the result
+-- as a data parsed from JSON.
 --
 -- Arguments
 --
---    * @callName:: String@: name of the previously registered @WiltonCall@
---    * @callData :: Aeson.Value@: arguments that are passes to the specified @WiltonCall@
+--    * @callName :: ByteString@: name of the previously registered @WiltonCall@
+--    * @callData :: arguments@: a data that implements [Data.Aeson.ToJSON](https://hackage.haskell.org/package/aeson-1.3.0.0/docs/Data-Aeson.html#t:ToJSON)
+--                               or an @Aeson.Value@ for dynamic JSON conversion
 --
--- Return value: either error string or a call response as a @ByteString@
+-- Return value: either error @ByteString@ or a call response as a data that implements
+-- [Data.Aeson.FromJSON](https://hackage.haskell.org/package/aeson-1.3.0.0/docs/Data-Aeson.html#t:FromJSON) and
+-- [Data.Data.Data](https://hackage.haskell.org/package/base-4.11.0.0/docs/Data-Data.html#t:Data)
+-- or an @Aeson.Value@ for dynamic JSON conversion
 --
 -- Example:
 --
--- > -- prepare call data (Aeson.Value)
--- > let callData = Aeson.Object (Map.fromList [
--- >         ("url", "http://127.0.0.1:8080/some/path"),
--- >         ("filePath", "path/to/file")
--- >         ])
+-- > -- call data definition
+-- >
+-- > data FileUploadArgs = FileUploadArgs
+-- >     { url :: Text
+-- >     , filePath :: Text
+-- >     } deriving (Generic, Show)
+-- > instance ToJSON FileUploadArgs
+-- >
+-- > let callData = FileUploadArgs
+-- >         {  url = "http://127.0.0.1:8080/some/path"
+-- >         , filePath = "path/to/file"
+-- >         }
 -- >
 -- > -- perform a call (sending a specified file over HTTP) and check the results
 -- > respEither <- runWiltonCall "httpclient_send_file" callData
--- > either (\err -> ...) (\respBs -> ...) respEither
+-- > either (\err -> ...) (\resp -> ...) respEither
 --
-runWiltonCall :: String -> Aeson.Value -> IO (Either String ByteString)
-runWiltonCall callName callData = do
-    let nameBs = UTF8.fromString callName
-    let callDataBs = ByteString.concat (ByteStringLazy.toChunks (Aeson.encode callData))
-    useAsCString nameBs (\nameCs ->
-        useAsCString callDataBs (\callDataCs ->
-            alloca (\outPtr -> do
-                alloca (\outLenPtr -> do
-                    let lenName = fromIntegral (ByteString.length nameBs)
-                    let lenData = fromIntegral (ByteString.length callDataBs)
-                    errc <- wiltoncall nameCs lenName callDataCs lenData outPtr outLenPtr
-                    out <- peek outPtr
-                    outLen <- peek outLenPtr
-                    res <- if 0 /= ptrToIntPtr errc then do
-                        bs <- packCString errc
-                        wilton_free errc
-                        return (Left (UTF8.toString bs))
-                    else do
-                        if 0 /= ptrToIntPtr out && outLen > 0 then do
-                           outBs <- packCStringLen (out, (fromIntegral outLen))
-                           return (Right outBs)
-                        else do
-                           return (Right (UTF8.fromString ""))
-                    if 0 /= ptrToIntPtr out then do
-                        _ <- wilton_free out
-                        return res
-                    else return res ))))
+invokeWiltonCall ::
+        forall arguments result. (ToJSON arguments, Data result, FromJSON result) =>
+        ByteString -> arguments -> IO (Either ByteString (Maybe result))
+invokeWiltonCall callName callData = do
+    let callDataBs = encodeJsonBytes callData
+    resEither <- invokeWiltonCallByteString callName callDataBs
+    case resEither of
+        Left err -> return (Left err)
+        Right jsonBs ->
+            if ByteString.length jsonBs > 0
+            then
+                case Aeson.eitherDecode (ByteStringLazy.fromChunks [jsonBs]) of
+                Left e ->
+                    return (Left (createParseError e (undefined :: result)))
+                Right (obj :: result) -> return (Right (Just obj))
+            else return (Right Nothing)
 
--- | Call JavaScript function
+-- | Invoke a function from @WiltonCall@ registry
 --
--- Allows to call a specified JavaScript function
--- passing arguments as a list of JSON values and receiving
--- result as a @ByteString@.
+-- Allows to call a specified function, that was previously registered as a @WiltonCall@
+-- passing arguments and receiving result as @ByteString@s.
 --
--- Arguments (JSON call descriptor fields):
+-- Arguments
 --
---    * @module :: Aeson.String@: name of the RequireJS module
---    * @func :: Aeson.String@: name of the function field in the module object (optional: not needed if module itself is a function)
---    * @args :: Aeson.Vector@: function arguments (optional)
+--    * @callName :: ByteString@: name of the previously registered @WiltonCall@
+--    * @callData :: ByteString@: argument (usually JSON) that is passes to the specified @WiltonCall@
 --
 -- Return value: either error string or a call response as a @ByteString@
 --
--- Example:
---
--- > -- prepare call descriptor (Aeson.Value)
--- > let callDesc = Aeson.Object (Map.fromList [
--- >         ("module", "lodash/string"),
--- >         ("func", "capitalize"),
--- >         ("args", Aeson.Array (Vector.fromList [Aeson.String msg]))
--- >         ])
--- >
--- > -- perform a call and check the results
--- > respEither <- runWiltonScript callDesc
--- > either (\err -> ...) (\respBs -> ...) respEither
---
-runWiltonScript :: Aeson.Value -> IO (Either String ByteString)
-runWiltonScript callDesc = do
-    let callDescBs = ByteString.concat (ByteStringLazy.toChunks (Aeson.encode callDesc))
-    useAsCString callDescBs (\cs ->
-        alloca (\outPtr -> do
-            alloca (\outLenPtr -> do
-                let len = fromIntegral (ByteString.length callDescBs)
-                errc <- wiltoncall_runscript cs (fromIntegral 0) cs len outPtr outLenPtr
-                out <- peek outPtr
-                outLen <- peek outLenPtr
-                res <- if 0 /= ptrToIntPtr errc then do
-                    bs <- packCString errc
-                    wilton_free errc
-                    return (Left (UTF8.toString bs))
-                else do
-                    if 0 /= ptrToIntPtr out && outLen > 0 then do
-                       outBs <- packCStringLen (out, (fromIntegral outLen))
-                       return (Right outBs)
-                    else do
-                       return (Right (UTF8.fromString ""))
-                if 0 /= ptrToIntPtr out then do
-                    _ <- wilton_free out
-                    return res
-                else return res )))
+invokeWiltonCallByteString :: ByteString -> ByteString -> IO (Either ByteString ByteString)
+invokeWiltonCallByteString callName callDataBs = do
+    useAsCString callName (\nameCs ->
+        useAsCString callDataBs (\callDataCs ->
+            alloca (\outPtr -> do
+                alloca (\outLenPtr -> do
+                    errc <- wiltoncall nameCs (bytesLength callName) callDataCs (bytesLength callDataBs) outPtr outLenPtr
+                    out <- peek outPtr
+                    outLen <- peek outLenPtr
+                    res <-
+                        if 0 /= ptrToIntPtr errc
+                        then do
+                            bs <- packCString errc
+                            wilton_free errc
+                            return (Left bs)
+                        else do
+                            if 0 /= ptrToIntPtr out && outLen > 0
+                            then do
+                               outBs <- packCStringLen (out, (fromIntegral outLen))
+                               return (Right outBs)
+                            else
+                               return (Right (UTF8.fromString ""))
+                    if 0 /= ptrToIntPtr out
+                    then do
+                        wilton_free out
+                        return res
+                    else return res ))))
 
 -- | Create an error message, that can be passed back to Wilton
 --
@@ -267,10 +264,9 @@ runWiltonScript callDesc = do
 --
 createWiltonError :: Maybe ByteString -> IO CString
 createWiltonError errBsMaybe =
-    maybe
-        (return nullPtr)
-        copyToWiltonBuffer
-        errBsMaybe
+    case errBsMaybe of
+        Just errBs -> copyToWiltonBuffer errBs
+        _ -> return nullPtr
 
 -- $use
 --
@@ -279,7 +275,6 @@ createWiltonError errBsMaybe =
 -- > dependencies:
 -- >    - ...
 -- >    - aeson
--- >    - utf8-string
 -- >    - wilton-ffi
 --
 -- Inside @Lib.hs@, enable required extensions:
