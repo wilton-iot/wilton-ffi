@@ -22,9 +22,9 @@ module Foreign.Wilton.FFI (
     ) where
 
 import Prelude
-    ( Either(Left, Right), IO, Maybe(Just, Nothing), String
+    ( Either(Left, Right), IO, Maybe(Just, Nothing)
     , (==), (/=), (>), (>=), (&&), (.), (+), (-), (++)
-    , fromIntegral, map, return, show, undefined
+    , fromIntegral, return, show, undefined
     )
 
 import Control.Exception (SomeException, catch)
@@ -33,15 +33,15 @@ import qualified Data.Aeson as Aeson (encode, eitherDecode)
 import qualified Data.ByteString as ByteString (concat, drop, length, take)
 import qualified Data.ByteString.Char8 as ByteStringChar8 (index)
 import qualified Data.ByteString.Lazy as ByteStringLazy (fromChunks, toChunks)
-import qualified Data.ByteString.UTF8 as UTF8 (fromString)
+import qualified Data.ByteString.UTF8 as UTF8 (fromString, toString)
 import Data.ByteString (ByteString, packCString, packCStringLen, useAsCString)
-import Data.Data (Data, constrFields, dataTypeConstrs, dataTypeOf)
+import Data.Typeable (Typeable, typeOf)
 import Foreign.Ptr (Ptr, FunPtr)
-import Foreign.C.String (CString, CStringLen)
+import Foreign.C.String (CString)
 import Foreign.C.Types (CChar, CInt(CInt))
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Marshal.Utils (copyBytes)
-import Foreign.Ptr (Ptr, FunPtr, nullPtr, ptrToIntPtr)
+import Foreign.Ptr (nullPtr, ptrToIntPtr)
 import Foreign.Storable (peek, poke, pokeByteOff)
 
 -- callback types
@@ -69,7 +69,6 @@ foreign import ccall safe "wiltoncall"
 foreign import ccall "wrapper"
     createCallbackPtr :: WiltonCallback -> IO (FunPtr WiltonCallback)
 
-
 -- helper functions
 
 copyToWiltonBuffer :: ByteString -> IO CString
@@ -79,11 +78,6 @@ copyToWiltonBuffer bs = do
         copyBytes res cs (ByteString.length bs))
     pokeByteOff res (ByteString.length bs) (0 :: CChar)
     return res
-
-createParseError :: Data a => String -> a -> ByteString
-createParseError e undef =
-    UTF8.fromString ("JSON parse error: [" ++ e ++ "], required fields: " ++
-        ((show . (map constrFields) . dataTypeConstrs . dataTypeOf) undef))
 
 encodeJsonBytes :: ToJSON a => a -> ByteString
 encodeJsonBytes = ByteString.concat . ByteStringLazy.toChunks . Aeson.encode
@@ -100,24 +94,26 @@ unwrapJsonString st =
     else st
 
 wrapBsCallback :: WiltonCallbackInternal -> WiltonCallback
-wrapBsCallback cb = (\_ jsonCs jsonCsLen jsonOutPtr jsonOutLenPtr -> do
-    dataBs <-
-        if 0 /= ptrToIntPtr jsonCs && jsonCsLen > 0
-        then packCStringLen (jsonCs, (fromIntegral jsonCsLen))
-        else return (UTF8.fromString "{}")
-    respEither <-
-        catch
-        (cb dataBs)
-        (\(e :: SomeException) ->
-            return (Left (UTF8.fromString (show e))))
-    case respEither of
-        Left errBs ->
-            copyToWiltonBuffer errBs
-        Right respBs -> do
-            respCs <- copyToWiltonBuffer respBs
-            poke jsonOutPtr respCs
-            poke jsonOutLenPtr (bytesLength respBs)
-            return nullPtr )
+wrapBsCallback cb = fun
+    where
+        fun _ jsonCs jsonCsLen jsonOutPtr jsonOutLenPtr = do
+            dataBs <-
+                if 0 /= ptrToIntPtr jsonCs && jsonCsLen > 0
+                then packCStringLen (jsonCs, (fromIntegral jsonCsLen))
+                else return (UTF8.fromString "{}")
+            respEither <-
+                catch
+                (cb dataBs)
+                (\(e :: SomeException) ->
+                    return (Left (UTF8.fromString (show e))))
+            case respEither of
+                Left errBs ->
+                    copyToWiltonBuffer errBs
+                Right respBs -> do
+                    respCs <- copyToWiltonBuffer respBs
+                    poke jsonOutPtr respCs
+                    poke jsonOutLenPtr (bytesLength respBs)
+                    return nullPtr
 
 -- | Registers a function, that can be called from javascript
 --
@@ -127,7 +123,7 @@ wrapBsCallback cb = (\_ jsonCs jsonCsLen jsonOutPtr jsonOutLenPtr -> do
 --
 -- Function must take a single argument - a data that implements
 -- [Data.Aeson.FromJSON](https://hackage.haskell.org/package/aeson-1.3.0.0/docs/Data-Aeson.html#t:FromJSON) and
--- [Data.Data.Data](https://hackage.haskell.org/package/base-4.11.0.0/docs/Data-Data.html#t:Data),
+-- [Data.Typeable.Typeable](http://hackage.haskell.org/package/base-4.11.1.0/docs/Data-Typeable.html#t:Typeable),
 -- and must return a data that implements
 -- [Data.Aeson.ToJSON](https://hackage.haskell.org/package/aeson-1.3.0.0/docs/Data-Aeson.html#t:ToJSON).
 -- Function input argument is converted from JavaScript object to Haskell data object.
@@ -139,22 +135,14 @@ wrapBsCallback cb = (\_ jsonCs jsonCsLen jsonOutPtr jsonOutLenPtr -> do
 -- Arguments:
 --
 --    * @name :: ByteString@: name for this call, that should be used from JavaScript to invoke the function
---    * @callback :: (arguments -> IO result)@: Function, that will be called from JavaScript
+--    * @callback :: (a -> IO b)@: Function, that will be called from JavaScript
 --
 -- Return value: error status.
 --
 registerWiltonCall ::
-        forall arguments result . (Data arguments, FromJSON arguments, ToJSON result) =>
-        ByteString -> (arguments -> IO result) -> IO (Maybe ByteString)
+        forall a b . (FromJSON a, Typeable a, ToJSON b) =>
+        ByteString -> (a -> IO b) -> IO (Maybe ByteString)
 registerWiltonCall nameBs cbJson = do
-    let cbBs = (\jsonBs ->
-            case Aeson.eitherDecode (ByteStringLazy.fromChunks [jsonBs]) of
-                Left e -> return (Left (createParseError e (undefined :: arguments)))
-                Right (obj :: arguments) -> do
-                    -- target callback is invoked here
-                    resObj <- cbJson obj
-                    let resBs = encodeJsonBytes resObj
-                    return (Right resBs) )
     let cbCs = wrapBsCallback cbBs
     cb <- createCallbackPtr cbCs
     errc <-
@@ -166,6 +154,18 @@ registerWiltonCall nameBs cbJson = do
         wilton_free errc
         return (Just bs)
     else return Nothing
+    where
+        cbBs jsonBs =
+            case Aeson.eitherDecode (ByteStringLazy.fromChunks [jsonBs]) of
+                Left e -> return (Left (UTF8.fromString ("Parse error,"
+                        ++ " json: [" ++ (UTF8.toString jsonBs) ++ "],"
+                        ++ " dest type: [" ++ (show (typeOf (undefined :: a))) ++ "],"
+                        ++ " message: [" ++ e ++ "]")))
+                Right (obj :: a) -> do
+                    -- target callback is invoked here
+                    resObj <- cbJson obj
+                    let resBs = encodeJsonBytes resObj
+                    return (Right resBs)
 
 -- | Invoke a function from @WiltonCall@ registry
 --
@@ -176,12 +176,12 @@ registerWiltonCall nameBs cbJson = do
 -- Arguments
 --
 --    * @callName :: ByteString@: name of the previously registered @WiltonCall@
---    * @callData :: arguments@: a data that implements [Data.Aeson.ToJSON](https://hackage.haskell.org/package/aeson-1.3.0.0/docs/Data-Aeson.html#t:ToJSON)
+--    * @callData :: a@: a data that implements [Data.Aeson.ToJSON](https://hackage.haskell.org/package/aeson-1.3.0.0/docs/Data-Aeson.html#t:ToJSON)
 --                               or an @Aeson.Value@ for dynamic JSON conversion
 --
 -- Return value: either error @ByteString@ or a call response as a data that implements
 -- [Data.Aeson.FromJSON](https://hackage.haskell.org/package/aeson-1.3.0.0/docs/Data-Aeson.html#t:FromJSON) and
--- [Data.Data.Data](https://hackage.haskell.org/package/base-4.11.0.0/docs/Data-Data.html#t:Data)
+-- [Data.Typeable.Typeable](http://hackage.haskell.org/package/base-4.11.1.0/docs/Data-Typeable.html#t:Typeable),
 -- or an @Aeson.Value@ for dynamic JSON conversion
 --
 -- Example:
@@ -200,8 +200,8 @@ registerWiltonCall nameBs cbJson = do
 -- > either (\err -> ...) (\resp -> ...) respEither
 --
 invokeWiltonCall ::
-        forall arguments result . (ToJSON arguments, Data result, FromJSON result) =>
-        ByteString -> arguments -> IO (Either ByteString (Maybe result))
+        forall a b . (ToJSON a, FromJSON b, Typeable b) =>
+        ByteString -> a -> IO (Either ByteString b)
 invokeWiltonCall callName callData = do
     let callDataBs = encodeJsonBytes callData
     -- this is ugly, but proper typing is cumbersome here
@@ -209,14 +209,17 @@ invokeWiltonCall callName callData = do
     resEither <- invokeWiltonCallByteString callName callDataPass
     case resEither of
         Left err -> return (Left err)
-        Right jsonBs ->
-            if ByteString.length jsonBs > 0
-            then
-                case Aeson.eitherDecode (ByteStringLazy.fromChunks [jsonBs]) of
+        Right jsonBs -> do
+            let jsonBsNonEmpty = if ByteString.length jsonBs > 0
+                then jsonBs
+                else UTF8.fromString "[]" -- unit
+            case Aeson.eitherDecode (ByteStringLazy.fromChunks [jsonBsNonEmpty]) of
                 Left e ->
-                    return (Left (createParseError e (undefined :: result)))
-                Right (obj :: result) -> return (Right (Just obj))
-            else return (Right Nothing)
+                    return (Left (UTF8.fromString ("Parse error,"
+                        ++ " json: [" ++ (UTF8.toString jsonBsNonEmpty) ++ "],"
+                        ++ " dest type: [" ++ (show (typeOf (undefined :: b))) ++ "]"
+                        ++ " message: [" ++ e ++ "]")))
+                Right (obj :: b) -> return (Right obj)
 
 -- | Invoke a function from @WiltonCall@ registry
 --
@@ -286,21 +289,20 @@ createWiltonError errBsMaybe =
 --
 -- Inside @Lib.hs@, enable required extensions:
 --
--- > {-# LANGUAGE DeriveDataTypeable #-}
 -- > {-# LANGUAGE DeriveGeneric #-}
 -- > {-# LANGUAGE ForeignFunctionInterface #-}
 --
 -- Import @aeson@, @wilton-ffi@ and other deps:
 --
 -- > import Data.Aeson
--- > import Data.Data
+-- > import Data.Typeable
 -- > import GHC.Generics
 -- > import Foreign.C.String
 -- > import Foreign.Wilton.FFI
 --
 -- Declare input/output structs:
 --
--- > data MyIn = MyIn {} deriving (Typeable, Data, Generic, Show)
+-- > data MyIn = MyIn {} deriving (Generic, Show, Typeable)
 -- > instance FromJSON MyIn
 -- > data MyOut = MyOut {} deriving (Generic, Show)
 -- > instance ToJSON MyObjOut
