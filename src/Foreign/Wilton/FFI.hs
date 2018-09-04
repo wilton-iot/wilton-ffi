@@ -23,14 +23,15 @@ module Foreign.Wilton.FFI (
 
 import Prelude
     ( Either(Left, Right), IO, Maybe(Just, Nothing), String
-    , (/=), (>), (&&), (.), (+), (++)
+    , (==), (/=), (>), (>=), (&&), (.), (+), (-), (++)
     , fromIntegral, map, return, show, undefined
     )
 
 import Control.Exception (SomeException, catch)
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Aeson (encode, eitherDecode)
-import qualified Data.ByteString as ByteString (concat, length)
+import qualified Data.ByteString as ByteString (concat, drop, length, take)
+import qualified Data.ByteString.Char8 as ByteStringChar8 (index)
 import qualified Data.ByteString.Lazy as ByteStringLazy (fromChunks, toChunks)
 import qualified Data.ByteString.UTF8 as UTF8 (fromString)
 import Data.ByteString (ByteString, packCString, packCStringLen, useAsCString)
@@ -90,6 +91,14 @@ encodeJsonBytes = ByteString.concat . ByteStringLazy.toChunks . Aeson.encode
 bytesLength :: ByteString -> CInt
 bytesLength = fromIntegral . ByteString.length
 
+unwrapJsonString :: ByteString -> ByteString
+unwrapJsonString st =
+    if ByteString.length st >= 2
+        && ('"' == ByteStringChar8.index st 0)
+        && ('"' == ByteStringChar8.index st ((ByteString.length st) - 1))
+    then ByteString.take ((ByteString.length st) - 2) (ByteString.drop 1 st)
+    else st
+
 wrapBsCallback :: WiltonCallbackInternal -> WiltonCallback
 wrapBsCallback cb = (\_ jsonCs jsonCsLen jsonOutPtr jsonOutLenPtr -> do
     dataBs <-
@@ -135,7 +144,7 @@ wrapBsCallback cb = (\_ jsonCs jsonCsLen jsonOutPtr jsonOutLenPtr -> do
 -- Return value: error status.
 --
 registerWiltonCall ::
-        forall arguments result. (Data arguments, FromJSON arguments, ToJSON result) =>
+        forall arguments result . (Data arguments, FromJSON arguments, ToJSON result) =>
         ByteString -> (arguments -> IO result) -> IO (Maybe ByteString)
 registerWiltonCall nameBs cbJson = do
     let cbBs = (\jsonBs ->
@@ -185,21 +194,19 @@ registerWiltonCall nameBs cbJson = do
 -- >     } deriving (Generic, Show)
 -- > instance ToJSON FileUploadArgs
 -- >
--- > let callData = FileUploadArgs
--- >         {  url = "http://127.0.0.1:8080/some/path"
--- >         , filePath = "path/to/file"
--- >         }
--- >
+-- > let callData = FileUploadArgs "http://127.0.0.1:8080/some/path" "path/to/file"
 -- > -- perform a call (sending a specified file over HTTP) and check the results
 -- > respEither <- runWiltonCall "httpclient_send_file" callData
 -- > either (\err -> ...) (\resp -> ...) respEither
 --
 invokeWiltonCall ::
-        forall arguments result. (ToJSON arguments, Data result, FromJSON result) =>
+        forall arguments result . (ToJSON arguments, Data result, FromJSON result) =>
         ByteString -> arguments -> IO (Either ByteString (Maybe result))
 invokeWiltonCall callName callData = do
     let callDataBs = encodeJsonBytes callData
-    resEither <- invokeWiltonCallByteString callName callDataBs
+    -- this is ugly, but proper typing is cumbersome here
+    let callDataPass = unwrapJsonString callDataBs
+    resEither <- invokeWiltonCallByteString callName callDataPass
     case resEither of
         Left err -> return (Left err)
         Right jsonBs ->
