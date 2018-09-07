@@ -41,7 +41,7 @@ import Foreign.C.String (CString)
 import Foreign.C.Types (CChar, CInt(CInt))
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Marshal.Utils (copyBytes)
-import Foreign.Ptr (nullPtr, ptrToIntPtr)
+import Foreign.Ptr (nullPtr)
 import Foreign.Storable (peek, poke, pokeByteOff)
 
 -- callback types
@@ -98,7 +98,7 @@ wrapBsCallback cb = fun
     where
         fun _ jsonCs jsonCsLen jsonOutPtr jsonOutLenPtr = do
             dataBs <-
-                if 0 /= ptrToIntPtr jsonCs && jsonCsLen > 0
+                if nullPtr /= jsonCs && jsonCsLen > 0
                 then packCStringLen (jsonCs, (fromIntegral jsonCsLen))
                 else return (UTF8.fromString "{}")
             respEither <-
@@ -115,7 +115,7 @@ wrapBsCallback cb = fun
                     poke jsonOutLenPtr (bytesLength respBs)
                     return nullPtr
 
--- | Registers a function, that can be called from javascript
+-- | Registers a function, that can be called from JavaScript
 --
 -- This function takes a function and registers it with Wilton, so
 -- it can be called from JavaScript using [wiltoncall](https://wilton-iot.github.io/wilton/docs/html/namespacewiltoncall.html)
@@ -126,7 +126,7 @@ wrapBsCallback cb = fun
 -- [Data.Typeable.Typeable](http://hackage.haskell.org/package/base-4.11.1.0/docs/Data-Typeable.html#t:Typeable),
 -- and must return a data that implements
 -- [Data.Aeson.ToJSON](https://hackage.haskell.org/package/aeson-1.3.0.0/docs/Data-Aeson.html#t:ToJSON).
--- Function input argument is converted from JavaScript object to Haskell data object.
+-- Function input argument is converted from a JavaScript object into a Haskell data object.
 -- Function output is returned to JavaScript as a JSON (that can be immediately converted to JavaScript object).
 --
 -- If function raises and @Exception@, its error message is converted into JavasSript `Error` message (that can be
@@ -148,7 +148,7 @@ registerWiltonCall nameBs cbJson = do
     errc <-
         useAsCString nameBs (\cs ->
             wiltoncall_register cs (bytesLength nameBs) nullPtr cb )
-    if 0 /= ptrToIntPtr errc
+    if nullPtr /= errc
     then do
         bs <- packCString errc
         wilton_free errc
@@ -196,7 +196,7 @@ registerWiltonCall nameBs cbJson = do
 -- >
 -- > let callData = FileUploadArgs "http://127.0.0.1:8080/some/path" "path/to/file"
 -- > -- perform a call (sending a specified file over HTTP) and check the results
--- > respEither <- runWiltonCall "httpclient_send_file" callData
+-- > respEither <- invokeWiltonCall "httpclient_send_file" callData
 -- > either (\err -> ...) (\resp -> ...) respEither
 --
 invokeWiltonCall ::
@@ -237,25 +237,27 @@ invokeWiltonCallByteString :: ByteString -> ByteString -> IO (Either ByteString 
 invokeWiltonCallByteString callName callDataBs = do
     useAsCString callName (\nameCs ->
         useAsCString callDataBs (\callDataCs ->
-            alloca (\outPtr -> do
-                alloca (\outLenPtr -> do
+            alloca (\(outPtr :: Ptr CString) -> do
+                alloca (\(outLenPtr :: Ptr CInt) -> do
+                    poke outPtr nullPtr
+                    poke outLenPtr 0
                     errc <- wiltoncall nameCs (bytesLength callName) callDataCs (bytesLength callDataBs) outPtr outLenPtr
                     out <- peek outPtr
                     outLen <- peek outLenPtr
                     res <-
-                        if 0 /= ptrToIntPtr errc
+                        if nullPtr /= errc
                         then do
                             bs <- packCString errc
                             wilton_free errc
                             return (Left bs)
                         else do
-                            if 0 /= ptrToIntPtr out && outLen > 0
+                            if nullPtr /= out && outLen > 0
                             then do
                                outBs <- packCStringLen (out, (fromIntegral outLen))
                                return (Right outBs)
                             else
                                return (Right (UTF8.fromString ""))
-                    if 0 /= ptrToIntPtr out
+                    if nullPtr /= out
                     then do
                         wilton_free out
                         return res
