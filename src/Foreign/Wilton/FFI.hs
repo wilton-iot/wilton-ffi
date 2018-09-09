@@ -35,7 +35,6 @@ import qualified Data.ByteString.Char8 as ByteStringChar8 (index)
 import qualified Data.ByteString.Lazy as ByteStringLazy (fromChunks, toChunks)
 import qualified Data.ByteString.UTF8 as UTF8 (fromString, toString)
 import Data.ByteString (ByteString, packCString, packCStringLen, useAsCString)
-import Data.Typeable (Typeable, typeOf)
 import Foreign.Ptr (Ptr, FunPtr)
 import Foreign.C.String (CString)
 import Foreign.C.Types (CChar, CInt(CInt))
@@ -122,8 +121,7 @@ wrapBsCallback cb = fun
 -- API.
 --
 -- Function must take a single argument - a data that implements
--- [Data.Aeson.FromJSON](https://hackage.haskell.org/package/aeson-1.3.0.0/docs/Data-Aeson.html#t:FromJSON) and
--- [Data.Typeable.Typeable](http://hackage.haskell.org/package/base-4.11.1.0/docs/Data-Typeable.html#t:Typeable),
+-- [Data.Aeson.FromJSON](https://hackage.haskell.org/package/aeson-1.3.0.0/docs/Data-Aeson.html#t:FromJSON)
 -- and must return a data that implements
 -- [Data.Aeson.ToJSON](https://hackage.haskell.org/package/aeson-1.3.0.0/docs/Data-Aeson.html#t:ToJSON).
 -- Function input argument is converted from a JavaScript object into a Haskell data object.
@@ -140,7 +138,7 @@ wrapBsCallback cb = fun
 -- Return value: error status.
 --
 registerWiltonCall ::
-        forall a b . (FromJSON a, Typeable a, ToJSON b) =>
+        forall a b . (FromJSON a, ToJSON b) =>
         ByteString -> (a -> IO b) -> IO (Maybe ByteString)
 registerWiltonCall nameBs cbJson = do
     let cbCs = wrapBsCallback cbBs
@@ -159,7 +157,6 @@ registerWiltonCall nameBs cbJson = do
             case Aeson.eitherDecode (ByteStringLazy.fromChunks [jsonBs]) of
                 Left e -> return (Left (UTF8.fromString ("Parse error,"
                         ++ " json: [" ++ (UTF8.toString jsonBs) ++ "],"
-                        ++ " dest type: [" ++ (show (typeOf (undefined :: a))) ++ "],"
                         ++ " message: [" ++ e ++ "]")))
                 Right (obj :: a) -> do
                     -- target callback is invoked here
@@ -180,8 +177,7 @@ registerWiltonCall nameBs cbJson = do
 --                               or an @Aeson.Value@ for dynamic JSON conversion
 --
 -- Return value: either error @ByteString@ or a call response as a data that implements
--- [Data.Aeson.FromJSON](https://hackage.haskell.org/package/aeson-1.3.0.0/docs/Data-Aeson.html#t:FromJSON) and
--- [Data.Typeable.Typeable](http://hackage.haskell.org/package/base-4.11.1.0/docs/Data-Typeable.html#t:Typeable),
+-- [Data.Aeson.FromJSON](https://hackage.haskell.org/package/aeson-1.3.0.0/docs/Data-Aeson.html#t:FromJSON)
 -- or an @Aeson.Value@ for dynamic JSON conversion
 --
 -- Example:
@@ -200,7 +196,7 @@ registerWiltonCall nameBs cbJson = do
 -- > either (\err -> ...) (\resp -> ...) respEither
 --
 invokeWiltonCall ::
-        forall a b . (ToJSON a, FromJSON b, Typeable b) =>
+        forall a b . (ToJSON a, FromJSON b) =>
         ByteString -> a -> IO (Either ByteString b)
 invokeWiltonCall callName callData = do
     let callDataBs = encodeJsonBytes callData
@@ -217,7 +213,6 @@ invokeWiltonCall callName callData = do
                 Left e ->
                     return (Left (UTF8.fromString ("Parse error,"
                         ++ " json: [" ++ (UTF8.toString jsonBsNonEmpty) ++ "],"
-                        ++ " dest type: [" ++ (show (typeOf (undefined :: b))) ++ "]"
                         ++ " message: [" ++ e ++ "]")))
                 Right (obj :: b) -> return (Right obj)
 
@@ -297,14 +292,13 @@ createWiltonError errBsMaybe =
 -- Import @aeson@, @wilton-ffi@ and other deps:
 --
 -- > import Data.Aeson
--- > import Data.Typeable
 -- > import GHC.Generics
 -- > import Foreign.C.String
 -- > import Foreign.Wilton.FFI
 --
 -- Declare input/output structs:
 --
--- > data MyIn = MyIn {} deriving (Generic, Show, Typeable)
+-- > data MyIn = MyIn {} deriving (Generic, Show)
 -- > instance FromJSON MyIn
 -- > data MyOut = MyOut {} deriving (Generic, Show)
 -- > instance ToJSON MyObjOut
