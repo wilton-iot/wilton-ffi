@@ -24,7 +24,7 @@ module Foreign.Wilton.FFI (
 import Prelude
     ( Either(Left, Right), IO, Maybe(Just, Nothing)
     , (==), (/=), (>), (>=), (&&), (.), (+), (-), (++)
-    , fromIntegral, return, show, undefined
+    , fromIntegral, return, show
     )
 
 import Control.Exception (SomeException, catch)
