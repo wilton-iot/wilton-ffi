@@ -35,12 +35,11 @@ import qualified Data.ByteString.Char8 as ByteStringChar8 (index)
 import qualified Data.ByteString.Lazy as ByteStringLazy (fromChunks, toChunks)
 import qualified Data.ByteString.UTF8 as UTF8 (fromString, toString)
 import Data.ByteString (ByteString, packCString, packCStringLen, useAsCString)
-import Foreign.Ptr (Ptr, FunPtr)
+import Foreign.Ptr (Ptr, FunPtr, nullPtr)
 import Foreign.C.String (CString)
 import Foreign.C.Types (CChar, CInt(CInt))
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Marshal.Utils (copyBytes)
-import Foreign.Ptr (nullPtr)
 import Foreign.Storable (peek, poke, pokeByteOff)
 
 -- callback types
@@ -61,7 +60,7 @@ foreign import ccall safe "wiltoncall_register"
     wiltoncall_register :: CString -> CInt -> Ptr () -> FunPtr WiltonCallback -> IO CString
 
 foreign import ccall safe "wiltoncall"
-    wiltoncall :: CString -> CInt -> CString -> CInt -> Ptr (CString) -> Ptr (CInt) -> IO CString
+    wiltoncall :: CString -> CInt -> CString -> CInt -> Ptr CString -> Ptr CInt -> IO CString
 
 -- function pointer wrapper
 
@@ -72,7 +71,7 @@ foreign import ccall "wrapper"
 
 copyToWiltonBuffer :: ByteString -> IO CString
 copyToWiltonBuffer bs = do
-    res <- wilton_alloc ((bytesLength bs) + 1)
+    res <- wilton_alloc (bytesLength bs + 1)
     useAsCString bs (\cs ->
         copyBytes res cs (ByteString.length bs))
     pokeByteOff res (ByteString.length bs) (0 :: CChar)
@@ -88,8 +87,8 @@ unwrapJsonString :: ByteString -> ByteString
 unwrapJsonString st =
     if ByteString.length st >= 2
         && ('"' == ByteStringChar8.index st 0)
-        && ('"' == ByteStringChar8.index st ((ByteString.length st) - 1))
-    then ByteString.take ((ByteString.length st) - 2) (ByteString.drop 1 st)
+        && ('"' == ByteStringChar8.index st (ByteString.length st - 1))
+    then ByteString.take (ByteString.length st - 2) (ByteString.drop 1 st)
     else st
 
 wrapBsCallback :: WiltonCallbackInternal -> WiltonCallback
@@ -98,7 +97,7 @@ wrapBsCallback cb = fun
         fun _ jsonCs jsonCsLen jsonOutPtr jsonOutLenPtr = do
             dataBs <-
                 if nullPtr /= jsonCs && jsonCsLen > 0
-                then packCStringLen (jsonCs, (fromIntegral jsonCsLen))
+                then packCStringLen (jsonCs, fromIntegral jsonCsLen)
                 else return (UTF8.fromString "{}")
             respEither <-
                 catch
@@ -156,7 +155,7 @@ registerWiltonCall nameBs cbJson = do
         cbBs jsonBs =
             case Aeson.eitherDecode (ByteStringLazy.fromChunks [jsonBs]) of
                 Left e -> return (Left (UTF8.fromString ("Parse error,"
-                        ++ " json: [" ++ (UTF8.toString jsonBs) ++ "],"
+                        ++ " json: [" ++ UTF8.toString jsonBs ++ "],"
                         ++ " message: [" ++ e ++ "]")))
                 Right (obj :: a) -> do
                     -- target callback is invoked here
@@ -212,7 +211,7 @@ invokeWiltonCall callName callData = do
             case Aeson.eitherDecode (ByteStringLazy.fromChunks [jsonBsNonEmpty]) of
                 Left e ->
                     return (Left (UTF8.fromString ("Parse error,"
-                        ++ " json: [" ++ (UTF8.toString jsonBsNonEmpty) ++ "],"
+                        ++ " json: [" ++ UTF8.toString jsonBsNonEmpty ++ "],"
                         ++ " message: [" ++ e ++ "]")))
                 Right (obj :: b) -> return (Right obj)
 
@@ -229,10 +228,10 @@ invokeWiltonCall callName callData = do
 -- Return value: either error string or a call response as a @ByteString@
 --
 invokeWiltonCallByteString :: ByteString -> ByteString -> IO (Either ByteString ByteString)
-invokeWiltonCallByteString callName callDataBs = do
+invokeWiltonCallByteString callName callDataBs =
     useAsCString callName (\nameCs ->
         useAsCString callDataBs (\callDataCs ->
-            alloca (\(outPtr :: Ptr CString) -> do
+            alloca (\(outPtr :: Ptr CString) ->
                 alloca (\(outLenPtr :: Ptr CInt) -> do
                     poke outPtr nullPtr
                     poke outLenPtr 0
@@ -245,10 +244,10 @@ invokeWiltonCallByteString callName callDataBs = do
                             bs <- packCString errc
                             wilton_free errc
                             return (Left bs)
-                        else do
+                        else
                             if nullPtr /= out && outLen > 0
                             then do
-                               outBs <- packCStringLen (out, (fromIntegral outLen))
+                               outBs <- packCStringLen (out, fromIntegral outLen)
                                return (Right outBs)
                             else
                                return (Right (UTF8.fromString ""))
